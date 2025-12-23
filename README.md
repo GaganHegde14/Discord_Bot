@@ -5,6 +5,7 @@ An anonymous Discord bot project.
 ## Installation
 
 1. Install dependencies:
+
 ```bash
 npm install
 ```
@@ -12,6 +13,7 @@ npm install
 2. Set up your environment variables in `.env` file
 
 3. Run the bot:
+
 ```bash
 node index.js
 ```
