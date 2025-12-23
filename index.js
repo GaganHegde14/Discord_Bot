@@ -1,18 +1,21 @@
-const express = require("express");
-const app = express();
-
-app.get("/", (req, res) => {
-  res.send("Bot is alive!");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
-});
-
 require("dotenv").config();
-const { Client, GatewayIntentBits, ChannelType } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  ChannelType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+} = require("discord.js");
+const express = require("express");
 
+/* ================= EXPRESS KEEP-ALIVE ================= */
+const app = express();
+app.get("/", (req, res) => res.send("Bot is alive"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🌐 Web server on ${PORT}`));
+
+/* ================= DISCORD CLIENT ================= */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -24,6 +27,7 @@ const client = new Client({
 
 const userState = new Map();
 const TIMEOUT_MS = 5 * 60 * 1000;
+const startTime = Date.now();
 
 /* ================= ROLE HELPERS ================= */
 const isAdmin = (m) => m.roles.cache.some((r) => r.name === "Admin");
@@ -33,22 +37,71 @@ const isModerator = (m) =>
   m.roles.cache.some((r) => ["Moderator", "Manager", "Admin"].includes(r.name));
 
 /* ================= READY ================= */
-client.once("ready", () => {
+client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  await postVerifyButton();
+});
+
+/* ================= VERIFY BUTTON ================= */
+async function postVerifyButton() {
+  const guild = client.guilds.cache.first();
+  if (!guild) return;
+
+  const channel = guild.channels.cache.find((c) => c.name === "verification");
+  if (!channel) return;
+
+  const button = new ButtonBuilder()
+    .setCustomId("start_verify")
+    .setLabel("Start Verification")
+    .setStyle(ButtonStyle.Primary);
+
+  const row = new ActionRowBuilder().addComponents(button);
+
+  const messages = await channel.messages.fetch({ limit: 5 });
+  if (messages.some((m) => m.author.id === client.user.id)) return;
+
+  await channel.send({
+    content:
+      "🔐 **Verification Required**\n\n" +
+      "Click the button below to begin verification.\n" +
+      "If nothing happens, the bot may be restarting.\n" +
+      "You can also type **!verify**.",
+    components: [row],
+  });
+}
+
+/* ================= INTERACTIONS ================= */
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  if (interaction.customId === "start_verify") {
+    await interaction.reply({
+      content: "⏳ Verification will begin in **5 seconds**…",
+      ephemeral: true,
+    });
+
+    setTimeout(() => startVerification(interaction.member), 5000);
+  }
 });
 
 /* ================= MEMBER JOIN ================= */
 client.on("guildMemberAdd", async (member) => {
-  const guild = member.guild;
-  const unverified = guild.roles.cache.find((r) => r.name === "Unverified");
-  const verificationChannel = guild.channels.cache.find(
+  const unverified = member.guild.roles.cache.find(
+    (r) => r.name === "Unverified"
+  );
+  if (unverified) await member.roles.add(unverified);
+});
+
+/* ================= START VERIFICATION ================= */
+async function startVerification(member) {
+  if (userState.has(member.id)) return;
+
+  const channel = member.guild.channels.cache.find(
     (c) => c.name === "verification"
   );
-  if (!unverified || !verificationChannel) return;
+  if (!channel) return;
 
-  await member.roles.add(unverified);
-
-  const thread = await verificationChannel.threads.create({
+  const thread = await channel.threads.create({
     name: `verify-${member.user.username}`,
     type: ChannelType.PrivateThread,
     autoArchiveDuration: 60,
@@ -68,183 +121,28 @@ client.on("guildMemberAdd", async (member) => {
     threadId: thread.id,
     startedAt: Date.now(),
   });
-});
+}
 
 /* ================= MESSAGE HANDLER ================= */
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   const content = message.content.trim();
 
-  /* -------- HELP -------- */
-  if (content === "help") {
-    return message.reply(
-      "📌 **Help**\n• Verification is automatic\n• Use `restart` if stuck\n• Contact moderators if needed"
-    );
-  }
-
-  /* -------- PING -------- */
-  if (content === "!ping" && isModerator(message.member)) {
-    return message.reply("🏓 Bot is online.");
-  }
-
-  /* -------- WHOIS (PRIVATE OUTPUT) -------- */
-  if (content.startsWith("!whois") && isModerator(message.member)) {
-    const target = message.mentions.members.first();
-    if (!target) return;
-
+  /* ---- !verify fallback ---- */
+  if (content === "!verify") {
     await message.delete().catch(() => {});
-    const modChannel = message.guild.channels.cache.find(
-      (c) => c.name === "mod-commands"
-    );
-
-    return modChannel?.send(
-      `🔍 **WHOIS**\nUser: ${target}\nID: ${target.id}\nNickname: ${
-        target.nickname || "None"
-      }`
-    );
+    return startVerification(message.member);
   }
 
-  /* -------- NICKNAME ASSIGN -------- */
-  if (content.startsWith("!nick") && isManager(message.member)) {
-    await message.delete().catch(() => {});
-    const args = content.split(" ");
-
-    // Reset nickname
-    if (args[1] === "reset") {
-      const target = message.mentions.members.first();
-      if (!target) return;
-      await target.setNickname(null).catch(() => {});
-      message.guild.channels.cache
-        .find((c) => c.name === "moderation-logs")
-        ?.send(`✏️ NICK RESET\nUser: ${target}\nBy: ${message.author}`);
-      return;
+  /* ---- bot control ---- */
+  if (message.channel.name === "bot-control" && isModerator(message.member)) {
+    if (content === "!status") {
+      const uptime = Math.floor((Date.now() - startTime) / 60000);
+      return message.reply(`🟢 Bot online\n⏱️ Uptime: ${uptime} minutes`);
     }
-
-    const target = message.mentions.members.first();
-    if (!target) return;
-
-    const nickname = args.slice(2).join(" ");
-    if (!nickname || nickname.length > 32) return;
-
-    await target.setNickname(nickname).catch(() => {});
-    message.guild.channels.cache
-      .find((c) => c.name === "moderation-logs")
-      ?.send(
-        `✏️ NICK SET\nUser: ${target}\nNew: ${nickname}\nBy: ${message.author}`
-      );
-    return;
   }
 
-  /* -------- CLEAR -------- */
-  if (content.startsWith("!clear") && isModerator(message.member)) {
-    await message.delete().catch(() => {});
-    const arg = content.split(" ")[1];
-    let deleted = 0;
-
-    if (arg === "all") {
-      let fetched;
-      do {
-        fetched = await message.channel.messages.fetch({ limit: 100 });
-        const deletable = fetched.filter(
-          (m) => Date.now() - m.createdTimestamp < 1209600000
-        );
-        await message.channel.bulkDelete(deletable, true);
-        deleted += deletable.size;
-      } while (fetched.size >= 2);
-    } else {
-      const count = parseInt(arg);
-      if (!count || count < 1 || count > 100) return;
-      const msgs = await message.channel.messages.fetch({ limit: count + 1 });
-      const deletable = msgs.filter(
-        (m) => Date.now() - m.createdTimestamp < 1209600000
-      );
-      await message.channel.bulkDelete(deletable, true);
-      deleted = deletable.size;
-    }
-
-    message.guild.channels.cache
-      .find((c) => c.name === "moderation-logs")
-      ?.send(
-        `🧹 CLEAR\nChannel: ${message.channel}\nBy: ${message.author}\nCount: ${deleted}`
-      );
-    return;
-  }
-
-  /* -------- WARN -------- */
-  if (content.startsWith("!warn") && isModerator(message.member)) {
-    const target = message.mentions.members.first();
-    const reason = content.split(" ").slice(2).join(" ") || "No reason";
-    if (!target) return;
-
-    await message.delete().catch(() => {});
-    await target.send(`⚠️ Warning: ${reason}`).catch(() => {});
-    message.guild.channels.cache
-      .find((c) => c.name === "moderation-logs")
-      ?.send(
-        `⚠️ WARN\nUser: ${target}\nBy: ${message.author}\nReason: ${reason}`
-      );
-    return;
-  }
-
-  /* -------- TIMEOUT -------- */
-  if (content.startsWith("!timeout") && isModerator(message.member)) {
-    const target = message.mentions.members.first();
-    const duration = content.split(" ")[2];
-    const reason = content.split(" ").slice(3).join(" ") || "No reason";
-    if (!target || !duration) return;
-
-    const ms = duration.endsWith("m")
-      ? parseInt(duration) * 60000
-      : duration.endsWith("h")
-      ? parseInt(duration) * 3600000
-      : duration.endsWith("d")
-      ? parseInt(duration) * 86400000
-      : null;
-    if (!ms) return;
-
-    await message.delete().catch(() => {});
-    await target.timeout(ms, reason);
-    message.guild.channels.cache
-      .find((c) => c.name === "moderation-logs")
-      ?.send(
-        `⏳ TIMEOUT\nUser: ${target}\nBy: ${message.author}\nDuration: ${duration}\nReason: ${reason}`
-      );
-    return;
-  }
-
-  /* -------- KICK -------- */
-  if (content.startsWith("!kick") && isManager(message.member)) {
-    const target = message.mentions.members.first();
-    const reason = content.split(" ").slice(2).join(" ") || "No reason";
-    if (!target) return;
-
-    await message.delete().catch(() => {});
-    await target.kick(reason);
-    message.guild.channels.cache
-      .find((c) => c.name === "moderation-logs")
-      ?.send(
-        `👢 KICK\nUser: ${target}\nBy: ${message.author}\nReason: ${reason}`
-      );
-    return;
-  }
-
-  /* -------- BAN -------- */
-  if (content.startsWith("!ban") && isModerator(message.member)) {
-    const target = message.mentions.members.first();
-    const reason = content.split(" ").slice(2).join(" ") || "No reason";
-    if (!target) return;
-
-    await message.delete().catch(() => {});
-    await target.ban({ reason });
-    message.guild.channels.cache
-      .find((c) => c.name === "moderation-logs")
-      ?.send(
-        `🚫 BAN\nUser: ${target}\nBy: ${message.author}\nReason: ${reason}`
-      );
-    return;
-  }
-
-  /* -------- VERIFICATION FLOW -------- */
+  /* ---- verification flow ---- */
   if (!message.channel.isThread()) return;
   const state = userState.get(message.author.id);
   if (!state || state.threadId !== message.channel.id) return;
@@ -254,11 +152,8 @@ client.on("messageCreate", async (message) => {
   }
 
   if (content.toLowerCase() === "restart") {
-    userState.set(message.author.id, {
-      step: "year",
-      threadId: state.threadId,
-      startedAt: Date.now(),
-    });
+    state.step = "year";
+    state.startedAt = Date.now();
     return message.channel.send("🔁 Restarted. Type 1–4.");
   }
 
@@ -281,13 +176,12 @@ client.on("messageCreate", async (message) => {
   if (state.step === "room") {
     state.room = content;
     state.step = "usn";
-    return message.channel.send("🆔 Enter USN (letters+numbers).");
+    return message.channel.send("🆔 Enter USN (letters + numbers).");
   }
 
   if (state.step === "usn") {
-    if (!/^[a-zA-Z0-9]+$/.test(content)) {
+    if (!/^[a-zA-Z0-9]+$/.test(content))
       return message.channel.send("❌ Invalid USN.");
-    }
 
     state.usn = content;
     const guild = message.guild;
